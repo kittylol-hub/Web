@@ -271,7 +271,7 @@ ReplicatedStorage.Remotes.ParrySuccess.OnClientEvent:Connect(function()
 	end
 end)
 
-local StackFlowURL = "https://raw.githubusercontent.com/kittylol-hub/Kittylol.hub/refs/heads/main/StackFlow_modified.txt"
+local StackFlowURL = "https://raw.githubusercontent.com/kittylol-hub/Web/refs/heads/main/StackFlow_modified_v2.luau"
 
 local Library = loadstring(game:HttpGet(StackFlowURL))()
 
