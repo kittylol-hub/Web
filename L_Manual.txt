@@ -13,7 +13,7 @@ local player = Players.LocalPlayer
 local SwordAPI = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("SwordAPI")
 
 local Config = {
-    TextColor = Color3.fromRGB(255, 255, 255),
+    TextColor = Color3.fromRGB(255, 105, 180),
     AccentColor = Color3.fromRGB(80, 0, 140),
     UiTransparency = 0,
     AutoParry = true,
