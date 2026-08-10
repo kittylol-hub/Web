@@ -271,7 +271,7 @@ ReplicatedStorage.Remotes.ParrySuccess.OnClientEvent:Connect(function()
 	end
 end)
 
-local StackFlowURL = "https://raw.githubusercontent.com/AchaoticSoftworksCore/AchaoticAssets/refs/heads/main/UiLibrarys/StackFlow.luau"
+local StackFlowURL = "https://raw.githubusercontent.com/kittylol-hub/Kittylol.hub/refs/heads/main/StackFlow_modified.txt"
 
 local Library = loadstring(game:HttpGet(StackFlowURL))()
 
