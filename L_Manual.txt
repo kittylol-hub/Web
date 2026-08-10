@@ -1,0 +1,1772 @@
+repeat task.wait() until game:IsLoaded()
+
+local UIS = game:GetService("UserInputService")
+local TS  = game:GetService("TweenService")
+local Players = game:GetService("Players")
+local HttpService = game:GetService("HttpService")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local StatsService = game:GetService("Stats")
+local Camera = workspace.CurrentCamera
+
+local player = Players.LocalPlayer
+local SwordAPI = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("SwordAPI")
+
+local Config = {
+    TextColor = Color3.fromRGB(255, 255, 255),
+    AccentColor = Color3.fromRGB(80, 0, 140),
+    UiTransparency = 0,
+    AutoParry = true,
+    ManualSpam = false,
+    Trigger = false,
+    SpamCPS = 200,
+    ParryAccuracy = 3.3,
+    AnimFix = true,
+    CurveType = "straight",
+    ShowBindWindow = false,
+    ShowSpamUI = false,
+    ShowTriggerUI = false,
+    ShowBallStats = true,
+    BackgroundId = "Background 1",
+}
+
+local themeLeft = Color3.fromRGB(30, 20, 45)
+local themeRight = Color3.fromRGB(15, 15, 20)
+local titleColorLeft = Color3.fromRGB(255, 105, 180)
+local titleColorRight = Color3.fromRGB(255, 255, 255)
+
+local trackingGradients = {}
+local trackingTextLabels = {}
+local activeToggleGradients = {}
+
+local img1 = "rbxassetid://121663636062758"
+local BACKGROUND_IMAGE = "rbxassetid://119944812407546"
+local CONFIG_INDEX_FILE = "Kittylol_Profiles_List.json"
+
+local spamBindKey = "P"
+local parried_balls = {}
+local triggered_balls = {}
+local AnimationCache = {}
+local spamActive = false
+local lastSpamTime = 0
+local ballStats = { current = 0, peak = 0 }
+local statsFrame, currentLabel, peakLabel = nil, nil, nil
+local BindButton, StatusBtn, MainSpamFrame, TBFrame, TBBtn, KeyboardFrame = nil, nil, nil, nil, nil, nil
+local ParryRemote = nil
+
+local function getGradientSequence(left, right)
+    left = left or Color3.fromRGB(255,255,255)
+    right = right or Color3.fromRGB(255,255,255)
+    local midColor = Color3.fromRGB(
+        math.clamp((left.R + right.R) * 0.5 * 255, 0, 255),
+        math.clamp((left.G + right.G) * 0.5 * 255, 0, 255),
+        math.clamp((left.B + right.B) * 0.5 * 255, 0, 255)
+    )
+    return ColorSequence.new({
+        ColorSequenceKeypoint.new(0, left),
+        ColorSequenceKeypoint.new(0.5, midColor),
+        ColorSequenceKeypoint.new(1, right)
+    })
+end
+
+local function getAdaptiveTextColor(bgLeft, bgRight)
+    bgLeft = bgLeft or Color3.fromRGB(0,0,0)
+    bgRight = bgRight or Color3.fromRGB(0,0,0)
+    local avgLuminance = ((bgLeft.R + bgLeft.G + bgLeft.B) / 3 + (bgRight.R + bgRight.G + bgRight.B) / 3) / 2
+    if avgLuminance > 0.73 then
+        return Color3.fromRGB(20, 20, 25)
+    else
+        return Color3.fromRGB(255, 255, 255)
+    end
+end
+
+local NameLabelGrad = nil
+local LogoGradient = nil
+
+local function UpdateGlobalTheme()
+    local sequence = getGradientSequence(themeLeft, themeRight)
+    local adaptedColor = getAdaptiveTextColor(themeLeft, themeRight)
+    Config.TextColor = adaptedColor
+
+    for _, grad in ipairs(trackingGradients) do
+        if grad and grad.Parent and grad.Name ~= "TitleTextGradient" and grad.Name ~= "LogoTextGradient" and grad.Name ~= "ActiveToggleGrad" then
+            pcall(function() grad.Color = sequence end)
+        end
+    end
+
+    local titleSeq = getGradientSequence(titleColorLeft, titleColorRight)
+    if NameLabelGrad then pcall(function() NameLabelGrad.Color = titleSeq end) end
+    if LogoGradient then pcall(function() LogoGradient.Color = titleSeq end) end
+
+    for _, tGrad in ipairs(activeToggleGradients) do
+        if tGrad and tGrad.Parent then pcall(function() tGrad.Color = titleSeq end) end
+    end
+
+    for _, lbl in ipairs(trackingTextLabels) do
+        if lbl and lbl.Parent then
+            if lbl.Name == "SecLabel" then
+                lbl.TextColor3 = (adaptedColor.R < 0.5) and Color3.fromRGB(80, 75, 90) or Color3.fromRGB(160, 150, 175)
+            elseif lbl.Name == "SliderValue" then
+                lbl.TextColor3 = (adaptedColor.R < 0.5) and Color3.fromRGB(70, 70, 80) or Color3.fromRGB(200, 200, 210)
+            elseif lbl.Name == "NameLabel" then
+                lbl.TextColor3 = Color3.fromRGB(255, 255, 255)
+            else
+                lbl.TextColor3 = adaptedColor
+            end
+        end
+    end
+end
+
+local function applyThemeGradient(parent)
+    local uiGradient = Instance.new("UIGradient")
+    uiGradient.Color = getGradientSequence(themeLeft, themeRight)
+    uiGradient.Parent = parent
+    table.insert(trackingGradients, uiGradient)
+    return uiGradient
+end
+
+local function registerTextLabel(label)
+    table.insert(trackingTextLabels, label)
+end
+
+local function getProfilesList()
+    if isfile and readfile and isfile(CONFIG_INDEX_FILE) then
+        local ok, data = pcall(function() return HttpService:JSONDecode(readfile(CONFIG_INDEX_FILE)) end)
+        if ok and type(data) == "table" then return data end
+    end
+    return {}
+end
+
+local function saveProfilesList(list)
+    if writefile and HttpService then
+        pcall(function() writefile(CONFIG_INDEX_FILE, HttpService:JSONEncode(list)) end)
+    end
+end
+
+local function GetBallSpeed()
+    for _, v in pairs(workspace.Balls:GetChildren()) do
+        if v:GetAttribute("realBall") then
+            if v.Velocity then return v.Velocity.Magnitude end
+            local z = v:FindFirstChild("zoomies")
+            if z and z:FindFirstChild("VectorVelocity") then
+                return z.VectorVelocity.Magnitude
+            end
+        end
+    end
+    return 0
+end
+
+local function UpdateBallStats()
+    local speed = GetBallSpeed()
+    ballStats.current = math.floor(speed * 10) / 10
+    if speed > ballStats.peak then ballStats.peak = math.floor(speed * 10) / 10 end
+    if statsFrame and statsFrame.Visible and currentLabel and peakLabel then
+        currentLabel.Text = string.format("%.1f", ballStats.current)
+        peakLabel.Text = string.format("%.1f", ballStats.peak)
+    end
+end
+
+local lastBallId = nil
+task.spawn(function()
+    while true do
+        local newId = nil
+        for _, v in pairs(workspace.Balls:GetChildren()) do
+            if v:GetAttribute("realBall") then
+                newId = v:GetDebugId()
+                break
+            end
+        end
+        if newId and newId ~= lastBallId then
+            ballStats.peak = 0
+            lastBallId = newId
+        end
+        task.wait(0.2)
+    end
+end)
+
+task.spawn(function()
+    while true do
+        if Config.ShowBallStats and statsFrame and statsFrame.Visible then
+            UpdateBallStats()
+        end
+        task.wait(0.05)
+    end
+end)
+
+local function GetPing()
+    local ok, result = pcall(function()
+        return StatsService.Network.ServerStatsItem["Data Ping"]:GetValue()
+    end)
+    return ok and result or 100
+end
+
+local Lerp_Radians = 0
+local Last_Warping = tick()
+
+local function Is_Curved(ball)
+    local Zoomies = ball:FindFirstChild("zoomies")
+    if not Zoomies then return false end
+    local Velocity = Zoomies.VectorVelocity
+    local Character = player.Character
+    if not Character or not Character.PrimaryPart then return false end
+
+    local distanceToBall = (Character.PrimaryPart.Position - ball.Position).Magnitude
+    if distanceToBall <= 25 then return false end
+
+    local Speed = Velocity.Magnitude
+    local Direction = (Character.PrimaryPart.Position - ball.Position).Unit
+    local Dot = Direction:Dot(Velocity.Unit)
+    local Ping = GetPing() / 1000
+    local Distance = (Character.PrimaryPart.Position - ball.Position).Magnitude
+    local Reach_Time = Distance / Speed - Ping
+    local Radians = math.rad(math.asin(math.clamp(Dot, -1, 1)))
+    Lerp_Radians = Lerp_Radians + (Radians - Lerp_Radians) * 0.8
+
+    if Lerp_Radians < 0.018 then Last_Warping = tick() end
+    if (tick() - Last_Warping) < (Reach_Time / 1.5) then return true end
+    return Dot < (0.5 - Ping)
+end
+
+local function GetParryAnimation()
+    local char = player.Character
+    local currentSword = char and char:GetAttribute("CurrentlyEquippedSword")
+    if not currentSword then
+        return SwordAPI.Collection.Default:FindFirstChild("GrabParry")
+    end
+    if AnimationCache[currentSword] then return AnimationCache[currentSword] end
+    local ok, swordData = pcall(function()
+        return ReplicatedStorage.Shared.ReplicatedInstances.Swords.GetSword:Invoke(currentSword)
+    end)
+    if ok and type(swordData) == "table" then
+        for _, obj in pairs(SwordAPI.Collection:GetChildren()) do
+            if obj.Name == swordData.AnimationType then
+                local anim = obj:FindFirstChild("GrabParry") or obj:FindFirstChild("Grab")
+                if anim then
+                    AnimationCache[currentSword] = anim
+                    return anim
+                end
+            end
+        end
+    end
+    return SwordAPI.Collection.Default:FindFirstChild("GrabParry")
+end
+
+local function PlayParryAnimation()
+    if not Config.AnimFix then return end
+    local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+    if not hum or not hum:FindFirstChild("Animator") then return end
+    local animation = GetParryAnimation()
+    if not animation then return end
+    for _, track in pairs(hum.Animator:GetPlayingAnimationTracks()) do
+        if track.Name:find("Grab") or track.Name:find("Parry") then
+            track:Stop(0.1)
+        end
+    end
+    local track = hum.Animator:LoadAnimation(animation)
+    track:Play(0, 1, 1)
+end
+
+local function ApplyCurveToCFrame(baseCFrame)
+    if not Config.CurveType or Config.CurveType == "straight" then return baseCFrame end
+    local rotation = CFrame.new()
+    if Config.CurveType == "backwards" then
+        rotation = CFrame.Angles(0, math.rad(180), 0)
+    elseif Config.CurveType == "down" then
+        rotation = CFrame.Angles(math.rad(-45), 0, 0)
+    elseif Config.CurveType == "up" then
+        rotation = CFrame.Angles(math.rad(45), 0, 0)
+    elseif Config.CurveType == "left" then
+        rotation = CFrame.Angles(0, math.rad(-90), 0)
+    elseif Config.CurveType == "right" then
+        rotation = CFrame.Angles(0, math.rad(90), 0)
+    elseif Config.CurveType == "random" then
+        rotation = CFrame.Angles(0, math.random() * math.pi * 2, 0)
+    end
+    return baseCFrame * rotation
+end
+
+local function GetParryData()
+    local viewportSize = Camera.ViewportSize
+    local centerPos = { viewportSize.X / 2, viewportSize.Y / 2 }
+    local events = {}
+    for _, v in pairs(workspace.Alive:GetChildren()) do
+        if v ~= player.Character and v:FindFirstChild("HumanoidRootPart") then
+            local screenPos, isOnScreen = Camera:WorldToScreenPoint(v.HumanoidRootPart.Position)
+            if isOnScreen then events[tostring(v)] = screenPos end
+        end
+    end
+    return Camera.CFrame, events, centerPos
+end
+
+do
+    local ok, PRY = pcall(function()
+        return require(ReplicatedStorage:FindFirstChild("PRY", true))
+    end)
+    if ok and PRY then
+        local Network = getupvalue(PRY, 6)
+        local Constants = getupvalue(PRY, 3)
+        local Convert = getupvalue(PRY, 4)
+        local Hash1 = getupvalue(PRY, 8)
+        local Hash2 = Constants[2]
+        local Hash3 = function()
+            local Constant = Convert(Hash2, "TIME")
+            local Time = tostring(math.floor(workspace:GetServerTimeNow() * 100))
+            local Encoded = {}
+            for i = 1, #Time do
+                local s1 = string.byte(Constant, ((i - 1) % #Constant) + 1)
+                Encoded[i] = string.char(bit32.bxor((string.byte(Time, i) + i) % 256, s1))
+            end
+            return table.concat(Encoded)
+        end
+
+        local RemoteName = string.gsub(game.JobId, "-", "")
+        local GetRemote = Network.RemoteEvent
+        task.spawn(function()
+            setthreadidentity(2)
+            setfenv(0, getfenv(PRY))
+            setfenv(1, getfenv(PRY))
+            ParryRemote = GetRemote(Network, RemoteName)
+        end)
+
+        getgenv()._Kittylol_Hash1 = Hash1
+        getgenv()._Kittylol_Hash2 = Hash2
+        getgenv()._Kittylol_Hash3 = Hash3
+    end
+end
+
+local function SendParry()
+    if not ParryRemote then return false end
+    local Hash1 = getgenv()._Kittylol_Hash1
+    local Hash2 = getgenv()._Kittylol_Hash2
+    local Hash3 = getgenv()._Kittylol_Hash3
+    if not Hash1 or not Hash2 or not Hash3 then return false end
+
+    local camCF, events, mousePos = GetParryData()
+    local modifiedCF = ApplyCurveToCFrame(camCF)
+    local success = pcall(function()
+        ParryRemote:FireServer(
+            Hash1,
+            Hash2,
+            Hash3(),
+            0.025,
+            modifiedCF,
+            events,
+            mousePos,
+            false
+        )
+    end)
+    if success and Config.AnimFix then
+        task.spawn(PlayParryAnimation)
+    end
+    return success
+end
+
+local function ProcessAutoParry(ball)
+    if not Config.AutoParry or spamActive then return end
+    local bID = ball:GetDebugId()
+    if ball:GetAttribute("target") ~= player.Name or parried_balls[bID] then return end
+    if Is_Curved(ball) then return end
+    local charPart = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+    if not charPart then return end
+    local velocity = ball.zoomies.VectorVelocity
+    local dist = (charPart.Position - ball.Position).Magnitude
+    local ping = GetPing()
+    local threshold = (velocity.Magnitude / Config.ParryAccuracy) + (ping / 10)
+    if dist <= threshold or dist <= 20 then
+        parried_balls[bID] = true
+        SendParry()
+        ball:GetAttributeChangedSignal("target"):Once(function()
+            parried_balls[bID] = nil
+        end)
+    end
+end
+
+local function ProcessTriggerBot(ball)
+    if not Config.Trigger or spamActive then return end
+    local bID = ball:GetDebugId()
+    if ball:GetAttribute("target") ~= player.Name and not triggered_balls[bID] then
+        triggered_balls[bID] = true
+        SendParry()
+        ball:GetAttributeChangedSignal("target"):Once(function()
+            triggered_balls[bID] = nil
+        end)
+    end
+end
+
+task.spawn(function()
+    while true do
+        if spamActive and ParryRemote then
+            local delay = 1 / math.max(Config.SpamCPS, 1)
+            if tick() - lastSpamTime >= delay then
+                SendParry()
+                lastSpamTime = tick()
+            end
+        end
+        task.wait(0.001)
+    end
+end)
+
+local function UpdateSpamUI()
+    if StatusBtn then
+        StatusBtn.Text = "Manual Spam"
+        StatusBtn.BackgroundColor3 = spamActive and Color3.fromRGB(255, 220, 240) or Color3.fromRGB(255, 255, 255)
+        StatusBtn.TextColor3 = Color3.fromRGB(255, 105, 180)
+    end
+end
+
+local function UpdateTriggerUI()
+    if TBBtn then
+        TBBtn.Text = Config.Trigger and "Triggerbot ON" or "Triggerbot OFF"
+        TBBtn.BackgroundColor3 = Config.Trigger and Color3.fromRGB(255, 220, 240) or Color3.fromRGB(255, 255, 255)
+        TBBtn.TextColor3 = Color3.fromRGB(255, 105, 180)
+    end
+end
+
+UIS.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode.Name == spamBindKey then
+        spamActive = not spamActive
+        Config.ManualSpam = spamActive
+        UpdateSpamUI()
+    end
+end)
+
+RunService.Heartbeat:Connect(function()
+    if not ParryRemote then return end
+    local ball = nil
+    for _, v in pairs(workspace.Balls:GetChildren()) do
+        if v:GetAttribute("realBall") then
+            ball = v
+            break
+        end
+    end
+    if ball then
+        if spamActive then
+        elseif Config.Trigger then
+            ProcessTriggerBot(ball)
+        elseif Config.AutoParry then
+            ProcessAutoParry(ball)
+        end
+    end
+end)
+
+pcall(function()
+    ReplicatedStorage.Remotes.ParrySuccess.OnClientEvent:Connect(function()
+        local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+        if not hum or not hum:FindFirstChild("Animator") then return end
+        for _, track in pairs(hum.Animator:GetPlayingAnimationTracks()) do
+            if track.Name:find("Grab") or track.Name:find("Parry") then
+                track:Stop(0.1)
+            end
+        end
+    end)
+end)
+
+local OverlayGui = Instance.new("ScreenGui")
+OverlayGui.Name = "Kittylol_Overlay"
+OverlayGui.ResetOnSpawn = false
+OverlayGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+pcall(function() OverlayGui.Parent = game:GetService("CoreGui") end)
+if not OverlayGui.Parent then
+    OverlayGui.Parent = player:WaitForChild("PlayerGui")
+end
+
+local function MakeDraggable(frame)
+    local dragging, dragInput, dragStart, startPos
+    frame.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = frame.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then dragging = false end
+            end)
+        end
+    end)
+    frame.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+            dragInput = input
+        end
+    end)
+    UIS.InputChanged:Connect(function(input)
+        if input == dragInput and dragging then
+            local delta = input.Position - dragStart
+            frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+end
+
+local kbKeys = {}
+local function RefreshKeyboardHighlight()
+    for code, btn in pairs(kbKeys) do
+        if code == spamBindKey then
+            btn.BackgroundColor3 = Color3.fromRGB(255, 105, 180)
+            btn.TextColor3 = Color3.fromRGB(30, 10, 20)
+        else
+            btn.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+            btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        end
+    end
+end
+
+local function BuildKeyRow(parent, keys, yPos, indent)
+    local row = Instance.new("Frame", parent)
+    row.BackgroundTransparency = 1
+    row.Size = UDim2.new(1, -16, 0, 30)
+    row.Position = UDim2.new(0, 8, 0, yPos)
+    local count = #keys
+    local spacing = 4
+    local totalW = 424 - indent * 2
+    local keyW = (totalW - (count - 1) * spacing) / count
+    for i, keyData in ipairs(keys) do
+        local display, code = keyData[1], keyData[2]
+        local btn = Instance.new("TextButton", row)
+        btn.Size = UDim2.new(0, keyW, 1, 0)
+        btn.Position = UDim2.new(0, indent + (i - 1) * (keyW + spacing), 0, 0)
+        btn.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+        btn.Text = display
+        btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        btn.Font = Enum.Font.GothamBold
+        btn.TextSize = 13
+        btn.ZIndex = 6
+        btn.BorderSizePixel = 0
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 5)
+        kbKeys[code] = btn
+        btn.MouseEnter:Connect(function()
+            if code ~= spamBindKey then btn.BackgroundColor3 = Color3.fromRGB(55, 55, 68) end
+        end)
+        btn.MouseLeave:Connect(function()
+            RefreshKeyboardHighlight()
+        end)
+        btn.MouseButton1Click:Connect(function()
+            spamBindKey = code
+            if BindButton then BindButton.Text = "[ " .. spamBindKey .. " ]" end
+            RefreshKeyboardHighlight()
+            KeyboardFrame.Visible = false
+            Config.ShowBindWindow = false
+        end)
+    end
+end
+
+KeyboardFrame = Instance.new("Frame", OverlayGui)
+KeyboardFrame.Size = UDim2.new(0, 440, 0, 204)
+KeyboardFrame.Position = UDim2.new(0.5, -220, 0.32, 0)
+KeyboardFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
+KeyboardFrame.BackgroundTransparency = 0.04
+KeyboardFrame.Visible = false
+KeyboardFrame.ZIndex = 5
+Instance.new("UICorner", KeyboardFrame).CornerRadius = UDim.new(0, 12)
+Instance.new("UIStroke", KeyboardFrame).Color = Color3.fromRGB(70, 70, 80)
+MakeDraggable(KeyboardFrame)
+
+local kbHeader = Instance.new("Frame", KeyboardFrame)
+kbHeader.BackgroundColor3 = Color3.fromRGB(12, 12, 12)
+kbHeader.Size = UDim2.new(1, 0, 0, 30)
+kbHeader.BorderSizePixel = 0
+Instance.new("UICorner", kbHeader).CornerRadius = UDim.new(0, 12)
+
+local kbTitle = Instance.new("TextLabel", kbHeader)
+kbTitle.BackgroundTransparency = 1
+kbTitle.Size = UDim2.new(1, -24, 1, 0)
+kbTitle.Position = UDim2.new(0, 12, 0, 0)
+kbTitle.Text = "SPAM KEYBOARD"
+kbTitle.TextColor3 = Color3.fromRGB(255, 105, 180)
+kbTitle.Font = Enum.Font.GothamBold
+kbTitle.TextSize = 12
+kbTitle.TextXAlignment = Enum.TextXAlignment.Left
+
+local digitKeys = {
+    {"1", "One"}, {"2", "Two"}, {"3", "Three"}, {"4", "Four"}, {"5", "Five"},
+    {"6", "Six"}, {"7", "Seven"}, {"8", "Eight"}, {"9", "Nine"}, {"0", "Zero"}
+}
+local rowQ = {{"Q","Q"},{"W","W"},{"E","E"},{"R","R"},{"T","T"},{"Y","Y"},{"U","U"},{"I","I"},{"O","O"},{"P","P"}}
+local rowA = {{"A","A"},{"S","S"},{"D","D"},{"F","F"},{"G","G"},{"H","H"},{"J","J"},{"K","K"},{"L","L"}}
+local rowZ = {{"Z","Z"},{"X","X"},{"C","C"},{"V","V"},{"B","B"},{"N","N"},{"M","M"}}
+
+BuildKeyRow(KeyboardFrame, digitKeys, 36, 0)
+BuildKeyRow(KeyboardFrame, rowQ, 70, 0)
+BuildKeyRow(KeyboardFrame, rowA, 104, 16)
+BuildKeyRow(KeyboardFrame, rowZ, 138, 32)
+
+local bottomRow = Instance.new("Frame", KeyboardFrame)
+bottomRow.BackgroundTransparency = 1
+bottomRow.Size = UDim2.new(1, -16, 0, 26)
+bottomRow.Position = UDim2.new(0, 8, 0, 172)
+
+BindButton = Instance.new("TextButton", bottomRow)
+BindButton.Size = UDim2.new(0, 130, 1, 0)
+BindButton.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+BindButton.Text = "[ " .. spamBindKey .. " ]"
+BindButton.TextColor3 = Color3.fromRGB(255, 170, 0)
+BindButton.Font = Enum.Font.GothamBold
+BindButton.TextSize = 12
+BindButton.ZIndex = 6
+BindButton.BorderSizePixel = 0
+Instance.new("UICorner", BindButton).CornerRadius = UDim.new(0, 5)
+
+local closeKbBtn = Instance.new("TextButton", bottomRow)
+closeKbBtn.Size = UDim2.new(0, 120, 1, 0)
+closeKbBtn.Position = UDim2.new(1, 0, 0, 0)
+closeKbBtn.BackgroundColor3 = Color3.fromRGB(60, 25, 30)
+closeKbBtn.Text = "CLOSE"
+closeKbBtn.TextColor3 = Color3.fromRGB(255, 200, 205)
+closeKbBtn.Font = Enum.Font.GothamBold
+closeKbBtn.TextSize = 12
+closeKbBtn.ZIndex = 6
+closeKbBtn.BorderSizePixel = 0
+Instance.new("UICorner", closeKbBtn).CornerRadius = UDim.new(0, 5)
+closeKbBtn.MouseButton1Click:Connect(function()
+    KeyboardFrame.Visible = false
+    Config.ShowBindWindow = false
+end)
+
+RefreshKeyboardHighlight()
+
+MainSpamFrame = Instance.new("Frame", OverlayGui)
+MainSpamFrame.Size = UDim2.new(0, 160, 0, 72)
+MainSpamFrame.Position = UDim2.new(0.5, -165, 0.15, 0)
+MainSpamFrame.BackgroundColor3 = Color3.fromRGB(245, 245, 245)
+MainSpamFrame.BackgroundTransparency = 0.05
+MainSpamFrame.Visible = false
+Instance.new("UICorner", MainSpamFrame).CornerRadius = UDim.new(0, 10)
+Instance.new("UIStroke", MainSpamFrame).Color = Color3.fromRGB(0, 0, 0)
+MakeDraggable(MainSpamFrame)
+
+StatusBtn = Instance.new("TextButton", MainSpamFrame)
+StatusBtn.Size = UDim2.new(1, -20, 1, -20)
+StatusBtn.Position = UDim2.new(0, 10, 0, 10)
+StatusBtn.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+StatusBtn.Text = "SPAM"
+StatusBtn.TextColor3 = Color3.fromRGB(255, 105, 180)
+StatusBtn.Font = Enum.Font.GothamBold
+StatusBtn.TextSize = 14
+Instance.new("UICorner", StatusBtn).CornerRadius = UDim.new(0, 8)
+StatusBtn.MouseButton1Click:Connect(function()
+    if not ParryRemote then
+        StatusBtn.Text = "NO REMOTE!"
+        task.wait(1)
+        UpdateSpamUI()
+        return
+    end
+    spamActive = not spamActive
+    Config.ManualSpam = spamActive
+    UpdateSpamUI()
+end)
+
+TBFrame = Instance.new("Frame", OverlayGui)
+TBFrame.Size = UDim2.new(0, 160, 0, 72)
+TBFrame.Position = UDim2.new(0.5, 5, 0.15, 0)
+TBFrame.BackgroundColor3 = Color3.fromRGB(245, 245, 245)
+TBFrame.BackgroundTransparency = 0.05
+TBFrame.Visible = false
+Instance.new("UICorner", TBFrame).CornerRadius = UDim.new(0, 10)
+Instance.new("UIStroke", TBFrame).Color = Color3.fromRGB(0, 0, 0)
+MakeDraggable(TBFrame)
+
+TBBtn = Instance.new("TextButton", TBFrame)
+TBBtn.Size = UDim2.new(1, -20, 1, -20)
+TBBtn.Position = UDim2.new(0, 10, 0, 10)
+TBBtn.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+TBBtn.Text = "Triggerbot OFF"
+TBBtn.TextColor3 = Color3.fromRGB(255, 105, 180)
+TBBtn.Font = Enum.Font.GothamBold
+TBBtn.TextSize = 14
+Instance.new("UICorner", TBBtn).CornerRadius = UDim.new(0, 8)
+TBBtn.MouseButton1Click:Connect(function()
+    if not ParryRemote then
+        TBBtn.Text = "NO REMOTE!"
+        task.wait(1)
+        UpdateTriggerUI()
+        return
+    end
+    Config.Trigger = not Config.Trigger
+    UpdateTriggerUI()
+end)
+
+statsFrame = Instance.new("Frame", OverlayGui)
+statsFrame.Size = UDim2.new(0, 180, 0, 95)
+statsFrame.Position = UDim2.new(0.5, 145, 0.15, 0)
+statsFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
+statsFrame.BackgroundTransparency = 0
+statsFrame.Visible = Config.ShowBallStats
+Instance.new("UICorner", statsFrame).CornerRadius = UDim.new(0, 10)
+Instance.new("UIStroke", statsFrame).Color = Color3.fromRGB(40, 40, 40)
+MakeDraggable(statsFrame)
+
+local statsHeader = Instance.new("Frame", statsFrame)
+statsHeader.Name = "Header"
+statsHeader.Size = UDim2.new(1, 0, 0, 26)
+statsHeader.Position = UDim2.new(0, 0, 0, 0)
+statsHeader.BackgroundColor3 = Color3.fromRGB(12, 12, 12)
+statsHeader.BorderSizePixel = 0
+Instance.new("UICorner", statsHeader).CornerRadius = UDim.new(0, 10)
+
+local statsTitle = Instance.new("TextLabel", statsHeader)
+statsTitle.Size = UDim2.new(1, -12, 1, 0)
+statsTitle.Position = UDim2.new(0, 12, 0, 0)
+statsTitle.BackgroundTransparency = 1
+statsTitle.Text = "Ball Stats"
+statsTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+statsTitle.TextSize = 13
+statsTitle.Font = Enum.Font.GothamBold
+statsTitle.TextXAlignment = Enum.TextXAlignment.Left
+
+local statsContent = Instance.new("Frame", statsFrame)
+statsContent.Size = UDim2.new(1, -18, 1, -34)
+statsContent.Position = UDim2.new(0, 9, 0, 30)
+statsContent.BackgroundTransparency = 1
+
+local currentCaption = Instance.new("TextLabel", statsContent)
+currentCaption.Size = UDim2.new(1, 0, 0, 14)
+currentCaption.Position = UDim2.new(0, 0, 0, 2)
+currentCaption.BackgroundTransparency = 1
+currentCaption.Text = "Current"
+currentCaption.TextColor3 = Color3.fromRGB(170, 170, 170)
+currentCaption.TextSize = 10
+currentCaption.Font = Enum.Font.Gotham
+currentCaption.TextXAlignment = Enum.TextXAlignment.Left
+
+currentLabel = Instance.new("TextLabel", statsContent)
+currentLabel.Size = UDim2.new(1, 0, 0, 20)
+currentLabel.Position = UDim2.new(0, 0, 0, 14)
+currentLabel.BackgroundTransparency = 1
+currentLabel.Text = "0.0"
+currentLabel.TextColor3 = Color3.fromRGB(34, 197, 94)
+currentLabel.TextSize = 16
+currentLabel.Font = Enum.Font.GothamBold
+currentLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+local peakCaption = Instance.new("TextLabel", statsContent)
+peakCaption.Size = UDim2.new(1, 0, 0, 14)
+peakCaption.Position = UDim2.new(0, 0, 0, 36)
+peakCaption.BackgroundTransparency = 1
+peakCaption.Text = "Peak"
+peakCaption.TextColor3 = Color3.fromRGB(170, 170, 170)
+peakCaption.TextSize = 10
+peakCaption.Font = Enum.Font.Gotham
+peakCaption.TextXAlignment = Enum.TextXAlignment.Left
+
+peakLabel = Instance.new("TextLabel", statsContent)
+peakLabel.Size = UDim2.new(1, 0, 0, 20)
+peakLabel.Position = UDim2.new(0, 0, 0, 50)
+peakLabel.BackgroundTransparency = 1
+peakLabel.Text = "0.0"
+peakLabel.TextColor3 = Color3.fromRGB(249, 115, 22)
+peakLabel.TextSize = 16
+peakLabel.Font = Enum.Font.GothamBold
+peakLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+local TargetGui = nil
+local okCore, coreGui = pcall(function() return game:GetService("CoreGui") end)
+if okCore and coreGui then
+    TargetGui = coreGui
+else
+    TargetGui = player:WaitForChild("PlayerGui", 5)
+end
+if not TargetGui then TargetGui = player:WaitForChild("PlayerGui") end
+
+if TargetGui:FindFirstChild("Kittylol_UI") then
+    pcall(function() TargetGui["Kittylol_UI"]:Destroy() end)
+end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "Kittylol_UI"
+ScreenGui.Parent = TargetGui
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Name = "MainFrame"
+MainFrame.Parent = ScreenGui
+MainFrame.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+MainFrame.BackgroundTransparency = Config.UiTransparency
+MainFrame.Position = UDim2.new(0.5, -240, 0.5, -160)
+MainFrame.Size = UDim2.new(0, 480, 0, 320)
+MainFrame.Active = true
+MainFrame.BorderSizePixel = 0
+MainFrame.ClipsDescendants = true
+
+local UICorner_Main = Instance.new("UICorner")
+UICorner_Main.CornerRadius = UDim.new(0, 10)
+UICorner_Main.Parent = MainFrame
+
+local BackgroundImage = Instance.new("ImageLabel")
+BackgroundImage.Name = "BackgroundImage"
+BackgroundImage.Parent = MainFrame
+BackgroundImage.BackgroundTransparency = 1
+BackgroundImage.ZIndex = 1
+BackgroundImage.Size = UDim2.new(1, 0, 1, 0)
+BackgroundImage.Image = BACKGROUND_IMAGE
+BackgroundImage.ScaleType = Enum.ScaleType.Crop
+BackgroundImage.BorderSizePixel = 0
+
+local UICorner_BgImage = Instance.new("UICorner")
+UICorner_BgImage.CornerRadius = UDim.new(0, 10)
+UICorner_BgImage.Parent = BackgroundImage
+
+applyThemeGradient(MainFrame)
+
+local LeftMenu = Instance.new("Frame")
+LeftMenu.Name = "LeftMenu"
+LeftMenu.Parent = MainFrame
+LeftMenu.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+LeftMenu.BackgroundTransparency = 0.88
+LeftMenu.Position = UDim2.new(0, 6, 0, 6)
+LeftMenu.Size = UDim2.new(0, 130, 0, 308)
+LeftMenu.ZIndex = 2
+LeftMenu.BorderSizePixel = 0
+
+Instance.new("UICorner", LeftMenu).CornerRadius = UDim.new(0, 8)
+
+local UIListLayout_Menu = Instance.new("UIListLayout")
+UIListLayout_Menu.Parent = LeftMenu
+UIListLayout_Menu.SortOrder = Enum.SortOrder.LayoutOrder
+UIListLayout_Menu.Padding = UDim.new(0, 4)
+
+local TitleHeader = Instance.new("TextButton")
+TitleHeader.Name = "TitleHeader"
+TitleHeader.Parent = LeftMenu
+TitleHeader.BackgroundTransparency = 1
+TitleHeader.Size = UDim2.new(1, 0, 0, 44)
+TitleHeader.Text = ""
+TitleHeader.AutoButtonColor = false
+
+local AnimatedImage = Instance.new("ImageLabel")
+AnimatedImage.Parent = TitleHeader
+AnimatedImage.BackgroundTransparency = 1
+AnimatedImage.Position = UDim2.new(0, 8, 0, 10)
+AnimatedImage.Size = UDim2.new(0, 24, 0, 24)
+AnimatedImage.Image = img1
+
+LogoGradient = Instance.new("UIGradient")
+LogoGradient.Name = "LogoTextGradient"
+LogoGradient.Parent = AnimatedImage
+
+local NameLabel = Instance.new("TextLabel")
+NameLabel.Name = "NameLabel"
+NameLabel.Parent = TitleHeader
+NameLabel.BackgroundTransparency = 1
+NameLabel.Position = UDim2.new(0, 38, 0, 0)
+NameLabel.Size = UDim2.new(1, -38, 1, 0)
+NameLabel.Font = Enum.Font.GothamBold
+NameLabel.Text = "Kittylol"
+NameLabel.TextSize = 13
+NameLabel.TextXAlignment = Enum.TextXAlignment.Left
+registerTextLabel(NameLabel)
+
+NameLabelGrad = Instance.new("UIGradient")
+NameLabelGrad.Name = "TitleTextGradient"
+NameLabelGrad.Parent = NameLabel
+
+local TabContainers = {}
+local CurrentTab = "Main"
+
+local function CreateTabFrame(tabName)
+    local ContentFrame = Instance.new("ScrollingFrame")
+    ContentFrame.Name = tabName .. "_Content"
+    ContentFrame.Parent = MainFrame
+    ContentFrame.BackgroundTransparency = 1
+    ContentFrame.Position = UDim2.new(0, 142, 0, 6)
+    ContentFrame.Size = UDim2.new(0, 332, 0, 308)
+    ContentFrame.ZIndex = 2
+    ContentFrame.Visible = (tabName == CurrentTab)
+    ContentFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+    ContentFrame.ScrollBarThickness = 2
+    ContentFrame.ScrollBarImageColor3 = Config.AccentColor
+    ContentFrame.BorderSizePixel = 0
+
+    local layout = Instance.new("UIListLayout")
+    layout.Parent = ContentFrame
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Padding = UDim.new(0, 6)
+
+    layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        ContentFrame.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 15)
+    end)
+
+    TabContainers[tabName] = ContentFrame
+    return ContentFrame
+end
+
+local IsMinimized = false
+local IsTransitioning = false
+local PreMinimizeSize = MainFrame.Size
+local PreMinimizeChildren = {}
+
+local function ConnectDraggingAndMinimize(frame, dragButton)
+    local activeInput, dragStart, startPos, touchStartTime, touchStartPos
+    local isDragging = false
+
+    dragButton.InputBegan:Connect(function(input)
+        if (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) and not activeInput then
+            activeInput = input
+            dragStart = input.Position
+            startPos = frame.Position
+            touchStartTime = os.clock()
+            touchStartPos = input.Position
+            isDragging = false
+        end
+    end)
+
+    UIS.InputChanged:Connect(function(input)
+        if input == activeInput and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            if delta.Magnitude > 5 then
+                isDragging = true
+                frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+            end
+        end
+    end)
+
+    UIS.InputEnded:Connect(function(input)
+        if input == activeInput then
+            local timeDelta = os.clock() - touchStartTime
+            local distanceDelta = (input.Position - touchStartPos).Magnitude
+            activeInput = nil
+
+            if not isDragging and distanceDelta < 7 and timeDelta < 0.35 then
+                if IsTransitioning then return end
+                IsTransitioning = true
+                IsMinimized = not IsMinimized
+
+                if IsMinimized then
+                    PreMinimizeSize = frame.Size
+                    for _, child in pairs(frame:GetChildren()) do
+                        if child ~= LeftMenu and child ~= BackgroundImage and child:IsA("GuiObject") then
+                            PreMinimizeChildren[child] = child.Visible
+                            child.Visible = false
+                        end
+                    end
+                    for _, child in pairs(LeftMenu:GetChildren()) do
+                        if child ~= TitleHeader and child:IsA("GuiObject") then
+                            PreMinimizeChildren[child] = child.Visible
+                            child.Visible = false
+                        end
+                    end
+
+                    TitleHeader.Size = UDim2.new(1, 0, 0, 24)
+                    AnimatedImage.Position = UDim2.new(0, 6, 0, 4)
+                    AnimatedImage.Size = UDim2.new(0, 16, 0, 16)
+                    NameLabel.Position = UDim2.new(0, 28, 0, 0)
+                    NameLabel.Size = UDim2.new(1, -28, 1, 0)
+                    NameLabel.TextSize = 11
+                    LeftMenu.BackgroundTransparency = 1
+                    BackgroundImage.Visible = true
+                    UICorner_Main.CornerRadius = UDim.new(0, 6)
+                    UICorner_BgImage.CornerRadius = UDim.new(0, 6)
+
+                    local closeTween = TS:Create(frame, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = UDim2.new(0, 110, 0, 36)})
+                    closeTween:Play()
+                    closeTween.Completed:Connect(function()
+                        LeftMenu.Size = UDim2.new(0, 98, 0, 24)
+                        IsTransitioning = false
+                    end)
+                else
+                    TitleHeader.Size = UDim2.new(1, 0, 0, 44)
+                    AnimatedImage.Position = UDim2.new(0, 8, 0, 10)
+                    AnimatedImage.Size = UDim2.new(0, 24, 0, 24)
+                    NameLabel.Position = UDim2.new(0, 38, 0, 0)
+                    NameLabel.Size = UDim2.new(1, -38, 1, 0)
+                    NameLabel.TextSize = 13
+                    LeftMenu.BackgroundTransparency = 0.88
+                    LeftMenu.Size = UDim2.new(0, 130, 0, 308)
+                    UICorner_Main.CornerRadius = UDim.new(0, 10)
+                    UICorner_BgImage.CornerRadius = UDim.new(0, 10)
+
+                    local openTween = TS:Create(frame, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = PreMinimizeSize})
+                    openTween:Play()
+                    openTween.Completed:Connect(function()
+                        for child, wasVisible in pairs(PreMinimizeChildren) do
+                            if child and child.Parent then child.Visible = wasVisible end
+                        end
+                        PreMinimizeChildren = {}
+                        for name, frameItem in pairs(TabContainers) do
+                            frameItem.Visible = (name == CurrentTab)
+                        end
+                        IsTransitioning = false
+                    end)
+                end
+            end
+        end
+    end)
+end
+
+ConnectDraggingAndMinimize(MainFrame, TitleHeader)
+
+local UI = {}
+
+function UI:CreateSection(tabName, titleText)
+    local targetFrame = TabContainers[tabName]
+    if not targetFrame then return end
+    local SecLabel = Instance.new("TextLabel")
+    SecLabel.Name = "SecLabel"
+    SecLabel.Parent = targetFrame
+    SecLabel.BackgroundTransparency = 1
+    SecLabel.Size = UDim2.new(1, -14, 0, 18)
+    SecLabel.Font = Enum.Font.GothamBold
+    SecLabel.Text = titleText:upper()
+    SecLabel.TextSize = 10
+    SecLabel.TextXAlignment = Enum.TextXAlignment.Left
+    SecLabel.ZIndex = 3
+    registerTextLabel(SecLabel)
+end
+
+function UI:CreateInfoLabel(tabName, text, textSize)
+    local targetFrame = TabContainers[tabName]
+    if not targetFrame then return end
+    local Label = Instance.new("TextLabel")
+    Label.Parent = targetFrame
+    Label.BackgroundTransparency = 1
+    Label.Size = UDim2.new(1, -14, 0, textSize and (textSize + 8) or 20)
+    Label.Font = Enum.Font.GothamSemibold
+    Label.Text = text
+    Label.TextSize = textSize or 12
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.ZIndex = 3
+    registerTextLabel(Label)
+    return Label
+end
+
+function UI:CreateToggle(tabName, text, configKey, onChange, description)
+    local targetFrame = TabContainers[tabName]
+    if not targetFrame then return end
+    local Frame = Instance.new("Frame")
+    Frame.Size = UDim2.new(1, -14, 0, description and 42 or 28)
+    Frame.BackgroundTransparency = 1
+    Frame.Parent = targetFrame
+
+    local Label = Instance.new("TextLabel")
+    Label.Parent = Frame
+    Label.BackgroundTransparency = 1
+    Label.Size = UDim2.new(0.72, -8, 0, description and 18 or 28)
+    Label.Position = UDim2.new(0, 0, 0, description and 0 or 0)
+    Label.Font = Enum.Font.GothamSemibold
+    Label.Text = text
+    Label.TextSize = 11
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.TextYAlignment = Enum.TextYAlignment.Center
+    Label.ZIndex = 3
+    registerTextLabel(Label)
+
+    if description then
+        local DescriptionLabel = Instance.new("TextLabel")
+        DescriptionLabel.Parent = Frame
+        DescriptionLabel.BackgroundTransparency = 1
+        DescriptionLabel.Position = UDim2.new(0, 0, 0, 19)
+        DescriptionLabel.Size = UDim2.new(0.72, -8, 0, 18)
+        DescriptionLabel.Font = Enum.Font.Gotham
+        DescriptionLabel.Text = description
+        DescriptionLabel.TextSize = 9
+        DescriptionLabel.TextColor3 = Color3.fromRGB(155, 155, 165)
+        DescriptionLabel.TextXAlignment = Enum.TextXAlignment.Left
+        DescriptionLabel.TextYAlignment = Enum.TextYAlignment.Center
+        DescriptionLabel.ZIndex = 3
+        registerTextLabel(DescriptionLabel)
+    end
+
+    local ToggleBg = Instance.new("TextButton")
+    ToggleBg.Parent = Frame
+    ToggleBg.Position = UDim2.new(1, -38, 0, description and 12 or 4)
+    ToggleBg.Size = UDim2.new(0, 34, 0, 18)
+    ToggleBg.Text = ""
+    ToggleBg.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+    ToggleBg.ZIndex = 3
+    ToggleBg.BorderSizePixel = 0
+    Instance.new("UICorner", ToggleBg).CornerRadius = UDim.new(1, 0)
+
+    local ToggleBall = Instance.new("Frame")
+    ToggleBall.Parent = ToggleBg
+    ToggleBall.Size = UDim2.new(0, 12, 0, 12)
+    ToggleBall.ZIndex = 4
+    ToggleBall.BorderSizePixel = 0
+    Instance.new("UICorner", ToggleBall).CornerRadius = UDim.new(1, 0)
+
+    local toggleGrad = Instance.new("UIGradient")
+    toggleGrad.Name = "ActiveToggleGrad"
+    toggleGrad.Color = getGradientSequence(titleColorLeft, titleColorRight)
+    toggleGrad.Parent = ToggleBg
+    table.insert(activeToggleGradients, toggleGrad)
+
+    local function updateView(animate)
+        local on = Config[configKey] == true
+        toggleGrad.Enabled = on
+        local targetPos = on and UDim2.new(1, -15, 0, 3) or UDim2.new(0, 3, 0, 3)
+        local targetBallColor = on and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(140, 140, 150)
+        local targetBgColor = on and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(35, 35, 45)
+        if animate then
+            TS:Create(ToggleBall, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Position = targetPos, BackgroundColor3 = targetBallColor}):Play()
+            if not on then TS:Create(ToggleBg, TweenInfo.new(0.18), {BackgroundColor3 = targetBgColor}):Play() end
+        else
+            ToggleBall.Position = targetPos
+            ToggleBall.BackgroundColor3 = targetBallColor
+            if not on then ToggleBg.BackgroundColor3 = targetBgColor end
+        end
+    end
+
+    ToggleBg.MouseButton1Click:Connect(function()
+        Config[configKey] = not Config[configKey]
+        updateView(true)
+        if onChange then onChange(Config[configKey]) end
+    end)
+    updateView(false)
+end
+
+function UI:CreateSlider(tabName, text, min, max, configKey, isTransparency, decimals)
+    local targetFrame = TabContainers[tabName]
+    if not targetFrame then return end
+    local Frame = Instance.new("Frame")
+    Frame.Size = UDim2.new(1, -14, 0, 38)
+    Frame.BackgroundTransparency = 1
+    Frame.Parent = targetFrame
+
+    local Label = Instance.new("TextLabel")
+    Label.Parent = Frame
+    Label.BackgroundTransparency = 1
+    Label.Size = UDim2.new(0.55, 0, 0, 14)
+    Label.Font = Enum.Font.GothamSemibold
+    Label.Text = text
+    Label.TextSize = 11
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    registerTextLabel(Label)
+
+    local SliderValue = Instance.new("TextLabel")
+    SliderValue.Name = "SliderValue"
+    SliderValue.Parent = Frame
+    SliderValue.BackgroundTransparency = 1
+    SliderValue.Position = UDim2.new(0.55, 0, 0, 0)
+    SliderValue.Size = UDim2.new(0, 140, 0, 14)
+    SliderValue.Font = Enum.Font.Code
+    SliderValue.TextXAlignment = Enum.TextXAlignment.Right
+    SliderValue.TextSize = 10
+    registerTextLabel(SliderValue)
+
+    local function formatVal(v)
+        if isTransparency then return tostring(math.floor(v * 100)) .. "%" end
+        if decimals then return string.format("%." .. decimals .. "f", v) end
+        return tostring(math.floor(v + 0.5))
+    end
+    SliderValue.Text = formatVal(Config[configKey])
+
+    local SliderBtn = Instance.new("TextButton")
+    SliderBtn.Parent = Frame
+    SliderBtn.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+    SliderBtn.Position = UDim2.new(0, 0, 0, 20)
+    SliderBtn.Size = UDim2.new(1, 0, 0, 12)
+    SliderBtn.Text = ""
+    SliderBtn.BorderSizePixel = 0
+    SliderBtn.AutoButtonColor = false
+    Instance.new("UICorner", SliderBtn).CornerRadius = UDim.new(1, 0)
+
+    local SliderFill = Instance.new("Frame")
+    SliderFill.Parent = SliderBtn
+    SliderFill.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    SliderFill.BorderSizePixel = 0
+    Instance.new("UICorner", SliderFill).CornerRadius = UDim.new(1, 0)
+    applyThemeGradient(SliderFill)
+
+    local function getRatio()
+        if isTransparency then return Config[configKey] / 0.40 end
+        return (Config[configKey] - min) / (max - min)
+    end
+    SliderFill.Size = UDim2.new(math.clamp(getRatio(), 0, 1), 0, 1, 0)
+
+    local dragging = false
+    local function adjustValue(input)
+        if SliderBtn.AbsoluteSize.X == 0 then return end
+        local posX = math.clamp((input.Position.X - SliderBtn.AbsolutePosition.X) / SliderBtn.AbsoluteSize.X, 0, 1)
+        SliderFill.Size = UDim2.new(posX, 0, 1, 0)
+        if isTransparency then
+            local val = posX * 0.40
+            Config[configKey] = val
+            MainFrame.BackgroundTransparency = val
+            if BackgroundImage then BackgroundImage.ImageTransparency = val end
+            SliderValue.Text = tostring(math.floor((val / 0.40) * 100)) .. "%"
+        else
+            local val = min + (max - min) * posX
+            if not decimals then val = math.floor(val + 0.5) end
+            Config[configKey] = val
+            SliderValue.Text = formatVal(val)
+        end
+    end
+
+    SliderBtn.MouseButton1Down:Connect(function() dragging = true end)
+    UIS.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            adjustValue(input)
+        end
+    end)
+    UIS.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+end
+
+function UI:CreateDropdown(tabName, text, options, configKey, onChange)
+    local targetFrame = TabContainers[tabName]
+    if not targetFrame then return end
+
+    local Label = Instance.new("TextLabel")
+    Label.Parent = targetFrame
+    Label.BackgroundTransparency = 1
+    Label.Size = UDim2.new(1, -14, 0, 16)
+    Label.Font = Enum.Font.GothamSemibold
+    Label.Text = text
+    Label.TextSize = 11
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    registerTextLabel(Label)
+
+    local DropBtn = Instance.new("TextButton")
+    DropBtn.Size = UDim2.new(1, -14, 0, 26)
+    DropBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 58)
+    DropBtn.Font = Enum.Font.GothamSemibold
+    DropBtn.Text = tostring(Config[configKey] or options[1]) .. "  v"
+    DropBtn.TextColor3 = Color3.fromRGB(200, 200, 210)
+    DropBtn.TextSize = 11
+    DropBtn.Parent = targetFrame
+    DropBtn.BorderSizePixel = 0
+    Instance.new("UICorner", DropBtn).CornerRadius = UDim.new(0, 5)
+
+    local ListFrame = Instance.new("Frame")
+    ListFrame.Size = UDim2.new(1, -14, 0, 0)
+    ListFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
+    ListFrame.BorderSizePixel = 0
+    ListFrame.ClipsDescendants = true
+    ListFrame.Parent = targetFrame
+    local dropLayout = Instance.new("UIListLayout", ListFrame)
+    dropLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+    local open = false
+    local function rebuild()
+        for _, c in ipairs(ListFrame:GetChildren()) do
+            if c:IsA("TextButton") then c:Destroy() end
+        end
+        for _, opt in ipairs(options) do
+            local row = Instance.new("TextButton")
+            row.Size = UDim2.new(1, 0, 0, 22)
+            row.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+            row.BackgroundTransparency = 0.3
+            row.Font = Enum.Font.Gotham
+            row.Text = "  " .. opt
+            row.TextColor3 = Color3.fromRGB(230, 230, 230)
+            row.TextSize = 11
+            row.TextXAlignment = Enum.TextXAlignment.Left
+            row.Parent = ListFrame
+            row.MouseButton1Click:Connect(function()
+                Config[configKey] = opt
+                DropBtn.Text = opt .. "  v"
+                open = false
+                TS:Create(ListFrame, TweenInfo.new(0.15), {Size = UDim2.new(1, -14, 0, 0)}):Play()
+                if onChange then onChange(opt) end
+            end)
+        end
+    end
+
+    DropBtn.MouseButton1Click:Connect(function()
+        open = not open
+        if open then
+            rebuild()
+            TS:Create(ListFrame, TweenInfo.new(0.15), {Size = UDim2.new(1, -14, 0, math.clamp(#options * 22, 0, 132))}):Play()
+        else
+            TS:Create(ListFrame, TweenInfo.new(0.15), {Size = UDim2.new(1, -14, 0, 0)}):Play()
+        end
+    end)
+end
+
+function UI:CreateButton(tabName, text, callback)
+    local targetFrame = TabContainers[tabName]
+    if not targetFrame then return end
+    local Btn = Instance.new("TextButton")
+    Btn.Size = UDim2.new(1, -14, 0, 26)
+    Btn.BackgroundColor3 = Color3.fromRGB(40, 40, 52)
+    Btn.Font = Enum.Font.GothamSemibold
+    Btn.Text = text
+    Btn.TextColor3 = Color3.fromRGB(240, 240, 250)
+    Btn.TextSize = 11
+    Btn.Parent = targetFrame
+    Btn.BorderSizePixel = 0
+    Instance.new("UICorner", Btn).CornerRadius = UDim.new(0, 5)
+    Btn.MouseButton1Click:Connect(callback)
+end
+
+function UI:CreateAdvancedColorPicker(tabName, mode)
+    local targetFrame = TabContainers[tabName]
+    if not targetFrame then return end
+    local container = Instance.new("Frame")
+    container.Size = UDim2.new(1, -14, 0, 110)
+    container.BackgroundTransparency = 1
+    container.Parent = targetFrame
+
+    local currentSelectedSide = "Left"
+    local currentH, currentS, currentV = 0, 1, 1
+
+    local switchRow = Instance.new("Frame")
+    switchRow.Size = UDim2.new(1, 0, 0, 20)
+    switchRow.BackgroundTransparency = 1
+    switchRow.Parent = container
+
+    local leftBtn = Instance.new("TextButton")
+    leftBtn.Size = UDim2.new(0.5, -3, 1, 0)
+    leftBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 52)
+    leftBtn.Text = "Side A"
+    leftBtn.TextColor3 = (mode == "Title") and titleColorLeft or themeLeft
+    leftBtn.Font = Enum.Font.GothamBold
+    leftBtn.TextSize = 10
+    leftBtn.Parent = switchRow
+    leftBtn.BorderSizePixel = 0
+    Instance.new("UICorner", leftBtn).CornerRadius = UDim.new(0, 4)
+
+    local rightBtn = Instance.new("TextButton")
+    rightBtn.Size = UDim2.new(0.5, -3, 1, 0)
+    rightBtn.Position = UDim2.new(0.5, 3, 0, 0)
+    rightBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 52)
+    rightBtn.Text = "Side B"
+    rightBtn.TextColor3 = (mode == "Title") and titleColorRight or themeRight
+    rightBtn.Font = Enum.Font.GothamBold
+    rightBtn.TextSize = 10
+    rightBtn.Parent = switchRow
+    rightBtn.BorderSizePixel = 0
+    Instance.new("UICorner", rightBtn).CornerRadius = UDim.new(0, 4)
+
+    local canvas = Instance.new("TextButton")
+    canvas.Size = UDim2.new(1, 0, 0, 45)
+    canvas.Position = UDim2.fromOffset(0, 26)
+    canvas.BackgroundColor3 = Color3.fromHSV(currentH, 1, 1)
+    canvas.Text = ""
+    canvas.AutoButtonColor = false
+    canvas.Parent = container
+    canvas.BorderSizePixel = 0
+    Instance.new("UICorner", canvas).CornerRadius = UDim.new(0, 4)
+
+    local satGrad = Instance.new("UIGradient")
+    satGrad.Color = ColorSequence.new(Color3.fromRGB(255, 255, 255), Color3.fromRGB(0, 0, 0))
+    satGrad.Rotation = 90
+    satGrad.Parent = canvas
+
+    local valueOverlay = Instance.new("Frame")
+    valueOverlay.Size = UDim2.new(1, 0, 1, 0)
+    valueOverlay.BackgroundTransparency = 0
+    valueOverlay.Parent = canvas
+    valueOverlay.BorderSizePixel = 0
+
+    local valGrad = Instance.new("UIGradient")
+    valGrad.Color = ColorSequence.new(Color3.fromRGB(255, 255, 255), Color3.fromRGB(0, 0, 0))
+    valGrad.Transparency = NumberSequence.new(0, 1)
+    valGrad.Parent = valueOverlay
+
+    local pointer = Instance.new("Frame")
+    pointer.Size = UDim2.fromOffset(5, 5)
+    pointer.Position = UDim2.new(currentS, -2.5, 1 - currentV, -2.5)
+    pointer.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    pointer.Parent = canvas
+    pointer.BorderSizePixel = 0
+
+    local hueTrack = Instance.new("TextButton")
+    hueTrack.Size = UDim2.new(1, 0, 0, 8)
+    hueTrack.Position = UDim2.fromOffset(0, 78)
+    hueTrack.Text = ""
+    hueTrack.AutoButtonColor = false
+    hueTrack.Parent = container
+    hueTrack.BorderSizePixel = 0
+    Instance.new("UICorner", hueTrack).CornerRadius = UDim.new(0, 3)
+
+    local hueGrad = Instance.new("UIGradient")
+    hueGrad.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 0, 0)),
+        ColorSequenceKeypoint.new(0.166, Color3.fromRGB(255, 255, 0)),
+        ColorSequenceKeypoint.new(0.333, Color3.fromRGB(0, 255, 0)),
+        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(0, 255, 255)),
+        ColorSequenceKeypoint.new(0.666, Color3.fromRGB(0, 0, 255)),
+        ColorSequenceKeypoint.new(0.833, Color3.fromRGB(255, 0, 255)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 0, 0))
+    })
+    hueGrad.Parent = hueTrack
+
+    local function updatePicker()
+        local selectedColor = Color3.fromHSV(currentH, currentS, currentV)
+        canvas.BackgroundColor3 = Color3.fromHSV(currentH, 1, 1)
+        if mode == "Title" then
+            if currentSelectedSide == "Left" then
+                titleColorLeft = selectedColor
+                leftBtn.TextColor3 = selectedColor
+            else
+                titleColorRight = selectedColor
+                rightBtn.TextColor3 = selectedColor
+            end
+        else
+            if currentSelectedSide == "Left" then
+                themeLeft = selectedColor
+                leftBtn.TextColor3 = selectedColor
+            else
+                themeRight = selectedColor
+                rightBtn.TextColor3 = selectedColor
+            end
+        end
+        UpdateGlobalTheme()
+    end
+
+    leftBtn.MouseButton1Click:Connect(function()
+        currentSelectedSide = "Left"
+        local baseColor = (mode == "Title") and titleColorLeft or themeLeft
+        currentH, currentS, currentV = baseColor:ToHSV()
+        pointer.Position = UDim2.new(currentS, -2.5, 1 - currentV, -2.5)
+        canvas.BackgroundColor3 = Color3.fromHSV(currentH, 1, 1)
+    end)
+
+    rightBtn.MouseButton1Click:Connect(function()
+        currentSelectedSide = "Right"
+        local baseColor = (mode == "Title") and titleColorRight or themeRight
+        currentH, currentS, currentV = baseColor:ToHSV()
+        pointer.Position = UDim2.new(currentS, -2.5, 1 - currentV, -2.5)
+        canvas.BackgroundColor3 = Color3.fromHSV(currentH, 1, 1)
+    end)
+
+    local isSlidingCanvas = false
+    canvas.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            isSlidingCanvas = true
+            if canvas.AbsoluteSize.X == 0 then return end
+            local x = math.clamp((input.Position.X - canvas.AbsolutePosition.X) / canvas.AbsoluteSize.X, 0, 1)
+            local y = math.clamp((input.Position.Y - canvas.AbsolutePosition.Y) / canvas.AbsoluteSize.Y, 0, 1)
+            pointer.Position = UDim2.new(x, -2.5, y, -2.5)
+            currentS = x
+            currentV = 1 - y
+            updatePicker()
+        end
+    end)
+
+    UIS.InputChanged:Connect(function(input)
+        if isSlidingCanvas and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            if canvas.AbsoluteSize.X == 0 then return end
+            local x = math.clamp((input.Position.X - canvas.AbsolutePosition.X) / canvas.AbsoluteSize.X, 0, 1)
+            local y = math.clamp((input.Position.Y - canvas.AbsolutePosition.Y) / canvas.AbsoluteSize.Y, 0, 1)
+            pointer.Position = UDim2.new(x, -2.5, y, -2.5)
+            currentS = x
+            currentV = 1 - y
+            updatePicker()
+        end
+    end)
+
+    UIS.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            isSlidingCanvas = false
+        end
+    end)
+
+    local isSlidingHue = false
+    hueTrack.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            isSlidingHue = true
+            if hueTrack.AbsoluteSize.X == 0 then return end
+            local x = math.clamp((input.Position.X - hueTrack.AbsolutePosition.X) / hueTrack.AbsoluteSize.X, 0, 0.999)
+            currentH = x
+            updatePicker()
+        end
+    end)
+
+    UIS.InputChanged:Connect(function(input)
+        if isSlidingHue and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            if hueTrack.AbsoluteSize.X == 0 then return end
+            local x = math.clamp((input.Position.X - hueTrack.AbsolutePosition.X) / hueTrack.AbsoluteSize.X, 0, 0.999)
+            currentH = x
+            updatePicker()
+        end
+    end)
+
+    UIS.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            isSlidingHue = false
+        end
+    end)
+end
+
+function UI:CreateProfileEngine(tabName)
+    local targetFrame = TabContainers[tabName]
+    if not targetFrame then return end
+
+    local NameInput = Instance.new("TextBox")
+    NameInput.Size = UDim2.new(1, -14, 0, 26)
+    NameInput.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+    NameInput.Font = Enum.Font.Gotham
+    NameInput.PlaceholderText = "Type Profile Name..."
+    NameInput.Text = ""
+    NameInput.TextColor3 = Color3.fromRGB(255, 255, 255)
+    NameInput.PlaceholderColor3 = Color3.fromRGB(120, 120, 130)
+    NameInput.TextSize = 11
+    NameInput.Parent = targetFrame
+    Instance.new("UICorner", NameInput).CornerRadius = UDim.new(0, 5)
+
+    local DropdownBtn = Instance.new("TextButton")
+    DropdownBtn.Size = UDim2.new(1, -14, 0, 26)
+    DropdownBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 58)
+    DropdownBtn.Font = Enum.Font.GothamSemibold
+    DropdownBtn.Text = "Select Profile v"
+    DropdownBtn.TextColor3 = Color3.fromRGB(200, 200, 210)
+    DropdownBtn.TextSize = 11
+    DropdownBtn.Parent = targetFrame
+    Instance.new("UICorner", DropdownBtn).CornerRadius = UDim.new(0, 5)
+
+    local DropdownListFrame = Instance.new("Frame")
+    DropdownListFrame.Size = UDim2.new(1, -14, 0, 0)
+    DropdownListFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
+    DropdownListFrame.BorderSizePixel = 0
+    DropdownListFrame.ClipsDescendants = true
+    DropdownListFrame.Parent = targetFrame
+    local dropLayout = Instance.new("UIListLayout", DropdownListFrame)
+    dropLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+    local selectedProfileName = ""
+    local dropdownOpen = false
+
+    local function rebuildDropdownRows()
+        if not DropdownListFrame then return end
+        for _, child in ipairs(DropdownListFrame:GetChildren()) do
+            if child:IsA("TextButton") then child:Destroy() end
+        end
+        local profiles = getProfilesList()
+        if #profiles == 0 then
+            DropdownBtn.Text = "No Profiles Found"
+            return
+        end
+        for _, profName in ipairs(profiles) do
+            local row = Instance.new("TextButton")
+            row.Size = UDim2.new(1, 0, 0, 22)
+            row.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+            row.BackgroundTransparency = 0.4
+            row.Font = Enum.Font.Gotham
+            row.Text = "  " .. profName
+            row.TextColor3 = Color3.fromRGB(230,  230, 230)
+            row.MouseButton1Click:Connect(function()
+                selectedProfileName = profName
+                DropdownBtn.Text = "Selected: " .. profName
+                dropdownOpen = false
+                TS:Create(DropdownListFrame, TweenInfo.new(0.2), {Size = UDim2.new(1, -14, 0, 0)}):Play()
+            end)
+        end
+    end
+
+    DropdownBtn.MouseButton1Click:Connect(function()
+        dropdownOpen = not dropdownOpen
+        if dropdownOpen then
+            rebuildDropdownRows()
+            local totalHeight = dropLayout.AbsoluteContentSize.Y
+            TS:Create(DropdownListFrame, TweenInfo.new(0.2), {Size = UDim2.new(1, -14, 0, math.clamp(totalHeight, 0, 100))}):Play()
+        else
+            TS:Create(DropdownListFrame, TweenInfo.new(0.2), {Size = UDim2.new(1, -14, 0, 0)}):Play()
+        end
+    end)
+
+    UI:CreateButton("Settings", "Save to Profile", function()
+        local configName = NameInput.Text
+        if configName == "" then return end
+
+        local currentList = getProfilesList()
+        if not table.find(currentList, configName) then
+            table.insert(currentList, configName)
+            saveProfilesList(currentList)
+        end
+
+        local fileTarget = "Kittylol_Profile_" .. configName .. ".json"
+        local data = {
+            AutoParry = Config.AutoParry,
+            ManualSpam = Config.ManualSpam,
+            Trigger = Config.Trigger,
+            SpamCPS = Config.SpamCPS,
+            ParryAccuracy = Config.ParryAccuracy,
+            AnimFix = Config.AnimFix,
+            CurveType = Config.CurveType,
+            UiTransparency = Config.UiTransparency,
+            BackgroundId = Config.BackgroundId,
+            ThemeLeft = {themeLeft.R, themeLeft.G, themeLeft.B},
+            ThemeRight = {themeRight.R, themeRight.G, themeRight.B},
+            TitleColorLeft = {titleColorLeft.R, titleColorLeft.G, titleColorLeft.B},
+            TitleColorRight = {titleColorRight.R, titleColorRight.G, titleColorRight.B}
+        }
+        if writefile then
+            pcall(function() writefile(fileTarget, HttpService:JSONEncode(data)) end)
+        end
+        NameInput.Text = ""
+        rebuildDropdownRows()
+    end)
+
+    UI:CreateButton("Settings", "Load Selected Profile", function()
+        if selectedProfileName == "" then return end
+        local fileTarget = "Kittylol_Profile_" .. selectedProfileName .. ".json"
+        if isfile and isfile(fileTarget) then
+            local ok, data = pcall(function() return HttpService:JSONDecode(readfile(fileTarget)) end)
+            if ok and data then
+                Config.AutoParry = data.AutoParry or true
+                Config.ManualSpam = data.ManualSpam or false
+                Config.Trigger = data.Trigger or false
+                Config.SpamCPS = data.SpamCPS or 200
+                Config.ParryAccuracy = data.ParryAccuracy or 3.3
+                Config.AnimFix = data.AnimFix or true
+                Config.CurveType = data.CurveType or "straight"
+                Config.UiTransparency = data.UiTransparency or 0
+                Config.BackgroundId = data.BackgroundId or "Background 1"
+
+                if data.ThemeLeft then themeLeft = Color3.new(data.ThemeLeft[1], data.ThemeLeft[2], data.ThemeLeft[3]) end
+                if data.ThemeRight then themeRight = Color3.new(data.ThemeRight[1], data.ThemeRight[2], data.ThemeRight[3]) end
+                if data.TitleColorLeft then titleColorLeft = Color3.new(data.TitleColorLeft[1], data.TitleColorLeft[2], data.TitleColorLeft[3]) end
+                if data.TitleColorRight then titleColorRight = Color3.new(data.TitleColorRight[1], data.TitleColorRight[2], data.TitleColorRight[3]) end
+
+                MainFrame.BackgroundTransparency = Config.UiTransparency
+                if BackgroundImage then
+                    BackgroundImage.ImageTransparency = Config.UiTransparency
+                    BackgroundImage.Image = GetBackgroundAsset(Config.BackgroundId)
+                end
+                UpdateGlobalTheme()
+            end
+        end
+    end)
+
+    UI:CreateButton("Settings", "Delete Selected Profile", function()
+        if selectedProfileName == "" then return end
+        local fileTarget = "Kittylol_Profile_" .. selectedProfileName .. ".json"
+        if delfile and isfile and isfile(fileTarget) then
+            pcall(function() delfile(fileTarget) end)
+        end
+        local currentList = getProfilesList()
+        local index = table.find(currentList, selectedProfileName)
+        if index then
+            table.remove(currentList, index)
+            saveProfilesList(currentList)
+        end
+        selectedProfileName = ""
+        DropdownBtn.Text = "Select Profile v"
+        rebuildDropdownRows()
+    end)
+end
+
+--------------------------------------------------
+-- BACKGROUND SELECTOR (2 lựa chọn)
+--------------------------------------------------
+local function GetBackgroundAsset(option)
+    if option == "Background 2" then
+        return "rbxassetid://109858495328822"
+    end
+    return "rbxassetid://119944812407546"
+end
+
+--------------------------------------------------
+-- TAB SYSTEM
+--------------------------------------------------
+local TabButtons = {}
+local function AddTab(name)
+    local _ = CreateTabFrame(name)
+    local TabBtn = Instance.new("TextButton")
+    local UICorner_Tab = Instance.new("UICorner")
+
+    TabBtn.Parent = LeftMenu
+    TabBtn.Size = UDim2.new(1, -12, 0, 28)
+    TabBtn.Font = Enum.Font.GothamSemibold
+    TabBtn.Text = "   " .. name
+    TabBtn.TextXAlignment = Enum.TextXAlignment.Left
+    TabBtn.TextSize = 11
+    TabBtn.ZIndex = 2
+    TabBtn.BorderSizePixel = 0
+
+    UICorner_Tab.CornerRadius = UDim.new(0, 4)
+    UICorner_Tab.Parent = TabBtn
+
+    local function renderTabState()
+        if not TabBtn then return end
+        if CurrentTab == name then
+            TabBtn.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+            TabBtn.BackgroundTransparency = 0.88
+            TabBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        else
+            TabBtn.BackgroundTransparency = 1
+            TabBtn.TextColor3 = Color3.fromRGB(150, 150, 160)
+        end
+    end
+
+    TabBtn.MouseButton1Click:Connect(function()
+        CurrentTab = name
+        for tName, frame in pairs(TabContainers) do
+            if frame then frame.Visible = (tName == CurrentTab) end
+        end
+        for _, btnUpdate in pairs(TabButtons) do
+            pcall(btnUpdate)
+        end
+    end)
+
+    table.insert(TabButtons, renderTabState)
+    renderTabState()
+end
+
+local tabsList = {"Main", "Combat", "Visual", "Settings"}
+for _, tabName in ipairs(tabsList) do AddTab(tabName) end
+
+--------------------------------------------------
+-- TAB 1: MAIN
+--------------------------------------------------
+UI:CreateSection("Main", "Main")
+UI:CreateInfoLabel("Main", "Ui thunder", 14)
+UI:CreateInfoLabel("Main", "Parry Kittylol", 13)
+UI:CreateInfoLabel("Main", "Dev : Storm", 12)
+UI:CreateInfoLabel("Main", "Admin : yassss", 12)
+
+--------------------------------------------------
+-- TAB 2: COMBAT
+--------------------------------------------------
+UI:CreateSection("Combat", "Auto Parry Mode")
+UI:CreateToggle("Combat", "Auto Parry", "AutoParry")
+UI:CreateToggle("Combat", "Manual Spam", "ManualSpam", function(v)
+    spamActive = v
+    Config.ManualSpam = v
+    Config.ShowSpamUI = v
+    if MainSpamFrame then
+        MainSpamFrame.Visible = v
+    end
+    UpdateSpamUI()
+end, "High-frequency parry spam")
+
+UI:CreateToggle("Combat", "Triggerbot", "Trigger", function(v)
+    Config.Trigger = v
+    Config.ShowTriggerUI = v
+    if TBFrame then
+        TBFrame.Visible = v
+    end
+    UpdateTriggerUI()
+end, "Parries instantly if targeted")
+
+UI:CreateSection("Combat", "Parry Settings")
+UI:CreateSlider("Combat", "Spam CPS", 60, 500, "SpamCPS", false)
+UI:CreateSlider("Combat", "Parry Accuracy", 1, 10, "ParryAccuracy", false, 1)
+UI:CreateDropdown("Combat", "Curve Type", {"straight", "backwards", "up", "down", "left", "right", "random"}, "CurveType")
+UI:CreateToggle("Combat", "Anim Fix", "AnimFix")
+
+--------------------------------------------------
+-- TAB 3: VISUAL
+--------------------------------------------------
+UI:CreateSection("Visual", "Visuals")
+UI:CreateToggle("Visual", "Ball Stats", "ShowBallStats", function(v)
+    if statsFrame then statsFrame.Visible = v end
+end)
+UI:CreateToggle("Visual", "Keyboard UI", "ShowBindWindow", function(v)
+    if KeyboardFrame then KeyboardFrame.Visible = v end
+end)
+
+--------------------------------------------------
+-- TAB 4: SETTINGS
+--------------------------------------------------
+UI:CreateSection("Settings", "Transparency")
+UI:CreateSlider("Settings", "UI Frame Opacity Layer", 0, 100, "UiTransparency", true)
+
+UI:CreateSection("Settings", "Background")
+UI:CreateDropdown("Settings", "Select Background", {"Background 1", "Background 2"}, "BackgroundId", function(opt)
+    if BackgroundImage then BackgroundImage.Image = GetBackgroundAsset(opt) end
+end)
+
+UI:CreateSection("Settings", "Spam Bind Key")
+UI:CreateButton("Settings", "Open Keyboard UI", function()
+    Config.ShowBindWindow = true
+    if KeyboardFrame then KeyboardFrame.Visible = true end
+    RefreshKeyboardHighlight()
+end)
+
+UI:CreateSection("Settings", "Cloud Local Drop Profiles")
+UI:CreateProfileEngine("Settings")
+
+UpdateGlobalTheme()
