@@ -1734,7 +1734,7 @@ end, "Parries instantly if targeted")
 UI:CreateSection("Combat", "Parry Settings")
 UI:CreateSlider("Combat", "Spam CPS", 60, 500, "SpamCPS", false)
 UI:CreateSlider("Combat", "Parry Accuracy", 1, 10, "ParryAccuracy", false, 1)
-UI:CreateDropdown("Combat", "Curve Type", {"straight", "backwards", "up", "down", "left", "right", "random"}, "CurveType")
+UI:CreateDropdown("Combat", "Curve Type", {"straight", "backwards", "up", "down", "left", "right", "random", "camera"}, "CurveType")
 UI:CreateToggle("Combat", "Anim Fix", "AnimFix")
 
 --------------------------------------------------
