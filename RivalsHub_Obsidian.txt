@@ -10,8 +10,8 @@ Library.ForceCheckbox = false
 Library.ShowToggleFrameInKeybinds = true
 
 local Window = Library:CreateWindow({
-    Title = "RivalsHub",
-    Footer = "v2.2",
+    Title = "Kttylol",
+    Footer = "v1",
     Icon = 120959262762131,
     CornerElements = false,
     NotifySide = "Right",
