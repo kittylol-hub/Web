@@ -18,9 +18,9 @@ local lp = Players.LocalPlayer
 local cam = ws.CurrentCamera
 
 local Window = Library:CreateWindow({
-    Title = "Rivals Hub",
-    Footer = "v2.2",
-    Icon = 120959262762131,
+    Title = "Kittylol",
+    Footer = "v1.0",
+    Icon = 121663636062758,
     CornerElements = false,
     NotifySide = "Right",
     ShowCustomCursor = true,
