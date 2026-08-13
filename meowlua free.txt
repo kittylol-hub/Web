@@ -1,0 +1,142 @@
+if not game:IsLoaded() then game.Loaded:Wait() end
+if getgenv().MeowCoreLoaded then return end
+getgenv().MeowCoreLoaded = true
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local LocalPlayer = Players.LocalPlayer
+
+-- // FRAMEWORK INITIALIZATION
+local repo = "https://raw.githubusercontent.com/mstudio45/LinoriaLib/main/"
+local Library = loadstring(game:HttpGet(repo .. "Library.lua"))()
+local ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
+local SaveManager = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
+
+local Config = {
+    TeleportAura = false,
+    AuraDistance = 2,
+    AuraSpeed = 150,
+    Wallbang = false,
+    Noclip = false,
+    RapidFire = false
+}
+
+-- // UI SETUP
+local Window = Library:CreateWindow({ Title = "Meow Enchantments", Center = true, AutoShow = true, Size = UDim2.fromOffset(450, 400) })
+local Tabs = { Rage = Window:AddTab("Ragebot"), Settings = Window:AddTab("Settings") }
+
+local MainBox = Tabs.Rage:AddLeftGroupbox("Core Features")
+MainBox:AddToggle("TA", { Text = "Teleport Aura", Callback = function(v) Config.TeleportAura = v end })
+MainBox:AddSlider("AD", { Text = "Aura Distance", Min = 1, Max = 10, Default = 2, Rounding = 1, Callback = function(v) Config.AuraDistance = v end })
+MainBox:AddSlider("AS", { Text = "Orbit Speed", Min = 0, Max = 500, Default = 150, Rounding = 0, Callback = function(v) Config.AuraSpeed = v end })
+MainBox:AddToggle("WB", { Text = "Wallbang (Curve to Head)", Callback = function(v) Config.Wallbang = v end })
+MainBox:AddToggle("NC", { Text = "Noclip", Callback = function(v) Config.Noclip = v end })
+MainBox:AddToggle("RF", { Text = "Rapid Fire (Auto-Shoot)", Callback = function(v) Config.RapidFire = v end })
+
+local ScriptBox = Tabs.Settings:AddLeftGroupbox("Control")
+ScriptBox:AddButton("Unload Script", function() 
+    Library:Unload()
+    getgenv().MeowCoreLoaded = nil 
+end)
+
+-- // FLAWLESS TARGETING (Bypasses Broken Team Logic)
+local GlobalTarget = nil
+local function UpdateTarget()
+    local dist = math.huge
+    local target = nil
+    local myHRP = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    
+    if not myHRP then 
+        GlobalTarget = nil 
+        return 
+    end
+
+    for _, v in ipairs(Players:GetPlayers()) do
+        if v ~= LocalPlayer and v.Character then
+            local targetHRP = v.Character:FindFirstChild("HumanoidRootPart")
+            local hum = v.Character:FindFirstChild("Humanoid")
+            
+            -- Checks if alive and exists
+            if targetHRP and hum and hum.Health > 0 then
+                local mag = (targetHRP.Position - myHRP.Position).Magnitude
+                if mag < dist then
+                    dist = mag
+                    target = v.Character
+                end
+            end
+        end
+    end
+    GlobalTarget = target
+end
+
+-- // WALLBANG REDIRECT (Mobile Safe Hook)
+local oldNamecall
+oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+    local method = getnamecallmethod()
+    local args = {...}
+    
+    if not checkcaller() and Config.Wallbang and GlobalTarget then
+        if method == "Raycast" or method == "FindPartOnRay" then
+            local head = GlobalTarget:FindFirstChild("Head")
+            if head then
+                if method == "Raycast" then
+                    args[2] = (head.Position - args[1]).Unit * 15000
+                else
+                    args[1] = Ray.new(args[1].Origin, (head.Position - args[1].Origin).Unit * 15000)
+                end
+                return oldNamecall(self, unpack(args))
+            end
+        end
+    end
+    return oldNamecall(self, ...)
+end)
+
+-- // APEX MOVEMENT & COMBAT (Runs Before Physics)
+local orbitAngle = 0
+RunService.Stepped:Connect(function()
+    UpdateTarget()
+    
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    
+    if hrp then
+        -- Noclip Logic
+        if Config.Noclip or Config.TeleportAura then
+            for _, part in ipairs(char:GetDescendants()) do
+                if part:IsA("BasePart") and part.CanCollide then
+                    part.CanCollide = false
+                end
+            end
+        end
+
+        -- Teleport Aura Logic
+        if Config.TeleportAura and GlobalTarget and GlobalTarget:FindFirstChild("HumanoidRootPart") then
+            local targetHRP = GlobalTarget.HumanoidRootPart
+            orbitAngle = orbitAngle + math.rad(Config.AuraSpeed * 0.05)
+            
+            local offset = CFrame.Angles(0, orbitAngle, 0) * CFrame.new(0, 0, Config.AuraDistance)
+            hrp.CFrame = targetHRP.CFrame * offset
+            
+            -- Kill all momentum so the server doesn't snap you back
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            hrp.AssemblyAngularVelocity = Vector3.zero
+            
+            -- Mobile Auto-Shoot Integration
+            if Config.RapidFire then
+                local tool = char:FindFirstChildOfClass("Tool")
+                if tool then
+                    tool:Activate()
+                end
+            end
+        end
+    end
+end)
+
+-- // CONFIG SAVE/LOAD
+SaveManager:SetLibrary(Library)
+SaveManager:SetFolder("MeowRageCore")
+SaveManager:BuildConfigSection(Tabs.Settings)
+ThemeManager:SetLibrary(Library)
+ThemeManager:ApplyToTab(Tabs.Settings)
+SaveManager:LoadAutoloadConfig()
